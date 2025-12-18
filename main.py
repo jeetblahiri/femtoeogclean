@@ -6,6 +6,8 @@ from tqdm import tqdm
 from utils import save_metrics
 from models import TwoHeadNet, baselineModel, conv3SingleHeadNet, conv4SingleHeadNet, conv5SingleHeadNet, conv6SingleHeadNet
 import argparse
+import random
+import pandas as pd
 
 # use this for one-out ablation
 def train_loop(
@@ -17,9 +19,16 @@ def train_loop(
     gpu=0,
     weight_decay=1e-4,
     dataset='denoise',
-    model=None
+    model=None,
+    seed=42
 ):
-    np.random.seed(42)
+    # added for reproducibility
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+
     metr_path=loss_path
 
     if dataset == 'denoise':
@@ -49,7 +58,7 @@ def train_loop(
 
     print("Train:", X_tr.shape, "Test:", X_te.shape, "(memmap:", isinstance(X_tr, np.memmap), ")")
 
-    ds_trn, ds_val, ds_tst = make_data(X_tr, S_tr, X_te, S_te)
+    ds_trn, ds_val, ds_tst = make_data(X_tr, S_tr, X_te, S_te, seed=seed)
 
     train_losses, val_losses = [], []
 
@@ -71,9 +80,13 @@ def train_loop(
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'CURRENT PARAMS - {params}')
 
-    LOSS_GRAPH_PATH = f"plots/{loss_path}_{model.__class__.__name__}_{dataset}_epochs_{num_epochs}_{params}_params.png"
-    METRICS_PATH = f"metrics_new/{metr_path}_{model.__class__.__name__}_{dataset}_epochs_{num_epochs}_metrics_{params}_params.txt"
-    METRICS_PATH_BCI = f"metrics_new/{metr_path}_{model.__class__.__name__}_{dataset}_epochs_{num_epochs}_bci_metrics_{params}_params.txt"
+    os.makedirs(f"plots_seed{seed}", exist_ok=True)
+    os.makedirs(f"metrics_new_seed{seed}", exist_ok=True)
+    os.makedirs(f"models_folder_new_seed{seed}", exist_ok=True)
+
+    LOSS_GRAPH_PATH = f"plots_seed{seed}/{loss_path}_{model.__class__.__name__}_{dataset}_epochs_{num_epochs}_{params}_params.png"
+    METRICS_PATH = f"metrics_new_seed{seed}/{metr_path}_{model.__class__.__name__}_{dataset}_epochs_{num_epochs}_metrics_{params}_params.txt"
+    METRICS_PATH_BCI = f"metrics_new_seed{seed}/{metr_path}_{model.__class__.__name__}_{dataset}_epochs_{num_epochs}_bci_metrics_{params}_params.txt"
 
     if os.path.exists(METRICS_PATH):
         print('skipping')
@@ -116,7 +129,7 @@ def train_loop(
         print(f"Epoch {epoch:02d}  train_clean_MSE={train_loss:.5f}  val_total={val_loss:.5f}")
         if val_loss < best_val - 1e-4:
             best_val, best_state = val_loss, {k: v.cpu() for k, v in model.state_dict().items()}
-            torch.save(model, f"models_folder_new/best_{model.__class__.__name__}_{loss_path}_{dataset}_epoch_{num_epochs}_weights_{params}_params.pth")
+            torch.save(model, f"models_folder_new_seed{seed}/best_{model.__class__.__name__}_{loss_path}_{dataset}_epoch_{num_epochs}_weights_{params}_params.pth")
 
     fig, ax1 = plt.subplots()
 
@@ -138,6 +151,14 @@ def train_loop(
     print(f'correct shapes - x: {X_te.shape}, s: {S_te.shape}')
     save_metrics(METRICS_PATH, model, ds_tst, X_te, S_te, weights)
     print('denoise metrics saved.')
+    X_gen_te = load_npy_safely("data_mwn/conts_snr_-3_3_test.npy", N_SAMPLES=N_SAMPLES, znorm=True)
+    X_gen_te = X_gen_te[np.random.choice(np.arange(X_gen_te.shape[0]), size=4000), :]
+    S_gen_te = load_npy_safely("data_mwn/cleans_snr_-3_3_test.npy", N_SAMPLES=N_SAMPLES, znorm=True)
+    S_gen_te = S_gen_te[np.random.choice(np.arange(S_gen_te.shape[0]), size=4000), :]
+    _, _, ds_gen_te = make_data(X_tr, S_tr, X_gen_te, S_gen_te)
+    print(f'shapes - x: {X_gen_te.shape}, s: {S_gen_te.shape}')
+    save_metrics(METRICS_PATH_BCI, model, ds_gen_te, X_gen_te, S_gen_te)
+    print('bci metrics saved.')
 
 def channelTrainLoop(ch, group_vals, scale_vals, mse_only_w, gpu=0):
     for g in group_vals:
@@ -157,16 +178,41 @@ def channelTrainLoop(ch, group_vals, scale_vals, mse_only_w, gpu=0):
  
 
 if __name__=="__main__":
-    gpu=6
+    gpu=5
+    seed = 99
 
     # dont change this, deprecated feature
     mse_only_w = {'L_clean':1.0}
 
-    channel_vals = [1, 2, 4, 8]
-    group_vals = [1, 2, 4, 8]
-    scale_vals = [1, 2, 4, 8]
+    # channel_vals = [1, 2, 4, 8]
+    # group_vals = [1, 2, 4, 8]
+    # scale_vals = [1, 2, 4, 8]
 
     # channelTrainLoop(channel_vals[0], group_vals, scale_vals, mse_only_w, gpu=gpu)
     # channelTrainLoop(channel_vals[1], group_vals, scale_vals, mse_only_w, gpu=gpu)
-    channelTrainLoop(channel_vals[2], group_vals, scale_vals, mse_only_w, gpu=gpu)
+    # channelTrainLoop(channel_vals[2], group_vals, scale_vals, mse_only_w, gpu=gpu)
     # channelTrainLoop(channel_vals[3], group_vals, scale_vals, mse_only_w, gpu=gpu)
+
+    # to reproduce 143 models
+    metr = pd.read_csv('FINAL_COMBINED_METRICS_143.csv')
+    metr = metr[['model_type', 'chans', 'groups', 'scale']]
+
+    for idx, row in metr.iterrows():
+        model_type = row['model_type']
+        ch = row['chans']
+        g = row['groups']
+        s = row['scale']
+        print(f'Training {idx}. {model_type}_ch{ch}_grp{g}_scale{s}')
+        if model_type == '3conv':
+            model = conv3SingleHeadNet(ch=ch, device=f'cuda:{gpu}', groups=g, scale_up=s)
+        elif model_type == '4conv':
+            model = conv4SingleHeadNet(ch=ch, device=f'cuda:{gpu}', groups=g, scale_up=s)
+        elif model_type == '5conv':
+            model = conv5SingleHeadNet(ch=ch, device=f'cuda:{gpu}', groups=g, scale_up=s)
+        elif model_type == '6conv':
+            model = conv6SingleHeadNet(ch=ch, device=f'cuda:{gpu}', groups=g, scale_up=s)
+        else:
+            raise
+            continue
+        
+        train_loop(mse_only_w, loss_path=f'seed{seed}_final_{model_type}_ch{ch}_grp{g}_scale{s}_denoise', metr_path=f'seed{seed}_final_{model_type}_ch{ch}_grp{g}_scale{s}_denoise', epochs=50, gpu=gpu, dataset='denoise', model=model, seed=seed)

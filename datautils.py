@@ -1,4 +1,5 @@
 import numpy as np
+import random
 
 def load_npy_safely(path, N_SAMPLES, mmap=False, znorm=False):
     """Load .npy as memmap (read-only) and coerce shape to (N, 512)."""
@@ -80,7 +81,7 @@ class EEGPairs(Dataset):
         #     sample["x2"] = self._remix(s, a)
         return sample
     
-def make_data(X_tr, S_tr, X_te, S_te, frac=0.1):
+def make_data(X_tr, S_tr, X_te, S_te, frac=0.1, seed=0):
     # Datasets
     ds_tr = EEGPairs(X_tr, S_tr, make_view=True)
     ds_te = EEGPairs(X_te, S_te, make_view=False)
@@ -89,18 +90,30 @@ def make_data(X_tr, S_tr, X_te, S_te, frac=0.1):
     N = len(ds_tr)
     n_val = max(1, int(0.1 * N))
     n_train = N - n_val
-    g = torch.Generator().manual_seed(0)
+    g = torch.Generator().manual_seed(seed)
     ds_trn, ds_val = random_split(ds_tr, [n_train, n_val], generator=g)
 
     # DataLoaders (tune num_workers to your box; 0 is safest)
+    # for reproducibility (following guidelines on docs.pytorch.org)
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+    
+    g1 = torch.Generator()
+    g1.manual_seed(seed)
+    g2 = torch.Generator()
+    g2.manual_seed(seed)
+    g3 = torch.Generator()
+    g3.manual_seed(seed)
+    
     batch_size = 128
     dl_trn = DataLoader(ds_trn, batch_size=batch_size, shuffle=True,  drop_last=True,
-                        num_workers=2, pin_memory=torch.cuda.is_available())
+                        num_workers=8, pin_memory=torch.cuda.is_available(), worker_init_fn=seed_worker, generator=g1)
     dl_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, drop_last=False,
-                        num_workers=0, pin_memory=torch.cuda.is_available())
+                        num_workers=0, pin_memory=torch.cuda.is_available(), worker_init_fn=seed_worker, generator=g2)
     dl_tst = DataLoader(ds_te,  batch_size=batch_size, shuffle=False, drop_last=False,
-                        num_workers=0, pin_memory=torch.cuda.is_available())
-
+                        num_workers=0, pin_memory=torch.cuda.is_available(), worker_init_fn=seed_worker, generator=g3)
     # Smoke test: fetch one batch and check shapes
     b = next(iter(dl_trn))
     print({k: v.shape for k, v in b.items()})
